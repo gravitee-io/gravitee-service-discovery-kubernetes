@@ -1,3 +1,10 @@
+# [1.0.0-alpha.2](https://github.com/gravitee-io/gravitee-service-discovery-kubernetes/compare/1.0.0-alpha.1...1.0.0-alpha.2) (2026-01-14)
+
+
+### Bug Fixes
+
+* configure the assembly plugin ([85be3a0](https://github.com/gravitee-io/gravitee-service-discovery-kubernetes/commit/85be3a09a47f477ec3f5ffd1615a9cca5691e367))
+
 # 1.0.0-alpha.1 (2026-01-14)
 
 
