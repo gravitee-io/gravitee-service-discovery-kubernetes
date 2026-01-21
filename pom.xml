@@ -29,7 +29,7 @@
 
     <groupId>io.gravitee.discovery</groupId>
     <artifactId>gravitee-service-discovery-kubernetes</artifactId>
-    <version>1.0.0-alpha.2</version>
+    <version>1.0.0-alpha.3</version>
     <name>Gravitee IO - Service Discovery - Kubernetes</name>
     <description>Api Service dedicated to manage Kubernetes endpoints service discovery for apis</description>
 
