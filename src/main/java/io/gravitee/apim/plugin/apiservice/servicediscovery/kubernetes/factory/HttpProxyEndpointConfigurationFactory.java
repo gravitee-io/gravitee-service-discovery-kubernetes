@@ -19,13 +19,13 @@ import io.gravitee.apim.plugin.apiservice.servicediscovery.kubernetes.Kubernetes
 import io.gravitee.kubernetes.client.model.v1.EndpointAddress;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
+import org.jspecify.annotations.NonNull;
 
 public class HttpProxyEndpointConfigurationFactory
   implements EndpointConfigurationFactory {
 
   public static final String ENDPOINT_TYPE = "http-proxy";
   private static final String DEFAULT_SCHEME = "http";
-  private static final String DEFAULT_PATH = "/";
 
   @Override
   public String buildConfiguration(
@@ -44,13 +44,30 @@ public class HttpProxyEndpointConfigurationFactory
     int port,
     KubernetesServiceDiscoveryServiceConfiguration configuration
   ) {
-    var scheme = normalizeValue(configuration.getScheme(), DEFAULT_SCHEME);
-    var path = normalizeValue(configuration.getPath(), DEFAULT_PATH);
+    var scheme = buildScheme(configuration);
+    var path = buildPath(configuration);
     var portSuffix = port > 0 ? ":" + port : "";
     return scheme + "://" + address.getIp() + portSuffix + path;
   }
 
-  private String normalizeValue(String value, String defaultValue) {
-    return value == null || value.isBlank() ? defaultValue : value;
+  private static @NonNull String buildScheme(
+    KubernetesServiceDiscoveryServiceConfiguration configuration
+  ) {
+    String scheme = configuration.getScheme();
+    return scheme == null || scheme.isBlank() ? DEFAULT_SCHEME : scheme;
+  }
+
+  private String buildPath(
+    KubernetesServiceDiscoveryServiceConfiguration configuration
+  ) {
+    String path = configuration.getPath();
+    if (path != null && !path.isBlank()) {
+      return removeTrailingSlash(path.startsWith("/") ? path : "/" + path);
+    }
+    return "";
+  }
+
+  private String removeTrailingSlash(String path) {
+    return path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
   }
 }
