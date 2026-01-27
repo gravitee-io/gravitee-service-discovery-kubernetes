@@ -69,11 +69,15 @@ public class KubernetesEventHandler {
       api.getName()
     );
     Set<String> next = new HashSet<>();
+    Set<String> notReady = new HashSet<>();
     endpointsList.forEach(endpoints ->
-      next.addAll(upsertFromEndpoints(endpoints))
+      {
+        next.addAll(upsertFromEndpoints(endpoints));
+        notReady.addAll(notReadyEndpointNames(endpoints));
+      }
     );
-    if (next.isEmpty()) {
-      // Avoid wiping all endpoints during transient empty snapshots.
+    if (next.isEmpty() && notReady.isEmpty()) {
+      // Avoid wiping all endpoints during transient empty snapshots with no signal.
       return;
     }
     updateDiscovered(next);
@@ -90,16 +94,19 @@ public class KubernetesEventHandler {
     }
 
     if (KubernetesEventType.DELETED.name().equals(event.getType())) {
+      Set<String> deletedNames = endpointNames(event.getObject());
+      deletedNames.addAll(notReadyEndpointNames(event.getObject()));
       Set<String> next = new HashSet<>(currentDiscovered());
-      next.removeAll(endpointNames(event.getObject()));
+      next.removeAll(deletedNames);
       updateDiscovered(next);
       return;
     }
 
     Set<String> next = endpointNames(event.getObject());
+    Set<String> notReady = notReadyEndpointNames(event.getObject());
     upsertFromEndpoints(event.getObject());
-    if (next.isEmpty()) {
-      // Avoid clearing endpoints when the update has no ready addresses.
+    if (next.isEmpty() && notReady.isEmpty()) {
+      // Avoid clearing endpoints when the update has no signal.
       return;
     }
     updateDiscovered(next);
@@ -107,7 +114,7 @@ public class KubernetesEventHandler {
 
   private Set<String> upsertFromEndpoints(Endpoints endpoints) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(endpoints, (address, port) -> {
+    forEachEndpoint(endpoints, false, (address, port) -> {
       var endpoint = EndpointFactory.build(group, address, port, configuration);
       endpointManager.addOrUpdateEndpoint(group.getName(), endpoint);
       names.add(EndpointFactory.endpointName(address, port));
@@ -117,13 +124,25 @@ public class KubernetesEventHandler {
 
   private Set<String> endpointNames(Endpoints endpoints) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(endpoints, (address, port) ->
+    forEachEndpoint(endpoints, false, (address, port) ->
       names.add(EndpointFactory.endpointName(address, port))
     );
     return names;
   }
 
-  private void forEachEndpoint(Endpoints endpoints, EndpointConsumer consumer) {
+  private Set<String> notReadyEndpointNames(Endpoints endpoints) {
+    Set<String> names = new HashSet<>();
+    forEachEndpoint(endpoints, true, (address, port) ->
+      names.add(EndpointFactory.endpointName(address, port))
+    );
+    return names;
+  }
+
+  private void forEachEndpoint(
+    Endpoints endpoints,
+    boolean notReady,
+    EndpointConsumer consumer
+  ) {
     if (endpoints.getSubsets() == null) {
       return;
     }
@@ -131,7 +150,9 @@ public class KubernetesEventHandler {
     Integer configuredPort = configuration.getPort();
     for (EndpointSubset subset : endpoints.getSubsets()) {
       List<EndpointPort> ports = subset.getPorts();
-      List<EndpointAddress> addresses = subset.getAddresses();
+      List<EndpointAddress> addresses = notReady
+        ? subset.getNotReadyAddresses()
+        : subset.getAddresses();
       if (ports == null || addresses == null) {
         continue;
       }
