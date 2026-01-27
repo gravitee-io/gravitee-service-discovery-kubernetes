@@ -118,6 +118,33 @@ class KubernetesEventHandlerTest {
   }
 
   @Test
+  void should_remove_endpoints_when_becoming_not_ready() throws Exception {
+    RecordingEndpointManager manager = new RecordingEndpointManager();
+    KubernetesServiceDiscoveryServiceConfiguration config =
+      KubernetesServiceDiscoveryServiceConfiguration.builder()
+        .port(DEFAULT_PORT)
+        .build();
+
+    KubernetesEventHandler handler = createHandler(manager, config);
+    Endpoints endpoints = endpoints(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(endpoints));
+
+    Endpoints notReady = endpointsNotReady(DEFAULT_IP, DEFAULT_PORT);
+    handler.handle(
+      new Event<>(KubernetesEventType.MODIFIED.name(), notReady)
+    );
+
+    Thread.sleep(50);
+
+    assertThat(manager.disabled).contains(
+      endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+    assertThat(manager.removed).contains(
+      endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+  }
+
+  @Test
   void should_add_all_ports_when_no_port_configured() {
     RecordingEndpointManager manager = new RecordingEndpointManager();
     KubernetesServiceDiscoveryServiceConfiguration config =
@@ -166,6 +193,26 @@ class KubernetesEventHandlerTest {
 
     EndpointSubset subset = new EndpointSubset();
     subset.setAddresses(Collections.singletonList(address));
+    subset.setPorts(endpointPorts);
+
+    Endpoints endpoints = new Endpoints();
+    endpoints.setSubsets(Collections.singletonList(subset));
+    return endpoints;
+  }
+
+  private static Endpoints endpointsNotReady(String ip, int... ports) {
+    EndpointAddress address = new EndpointAddress();
+    address.setIp(ip);
+
+    List<EndpointPort> endpointPorts = new ArrayList<>();
+    for (int port : ports) {
+      EndpointPort endpointPort = new EndpointPort();
+      endpointPort.setPort(port);
+      endpointPorts.add(endpointPort);
+    }
+
+    EndpointSubset subset = new EndpointSubset();
+    subset.setNotReadyAddresses(Collections.singletonList(address));
     subset.setPorts(endpointPorts);
 
     Endpoints endpoints = new Endpoints();
