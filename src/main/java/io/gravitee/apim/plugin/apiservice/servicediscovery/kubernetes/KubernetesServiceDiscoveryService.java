@@ -32,11 +32,13 @@ import io.gravitee.kubernetes.client.impl.KubernetesClientV1Impl;
 import io.gravitee.kubernetes.client.model.v1.Endpoints;
 import io.gravitee.kubernetes.client.model.v1.Event;
 import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.disposables.Disposable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import lombok.CustomLog;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
@@ -50,9 +52,14 @@ public class KubernetesServiceDiscoveryService implements ApiService {
     "kubernetes-service-discovery";
   public static final String PENDING_REQUESTS_TIMEOUT_PROPERTY =
     "api.pending_requests_timeout";
+  public static final String RESYNC_INTERVAL_PROPERTY =
+    "api.kubernetes.service_discovery.resync_interval";
+  public static final String WATCH_RETRY_DELAY_PROPERTY =
+    "api.kubernetes.service_discovery.watch_retry_delay";
   private static final String SERVICE_DISCOVERY_KIND = "service-discovery";
 
   private final Map<String, Disposable> watchers = new ConcurrentHashMap<>(1);
+  private final Map<String, Disposable> resyncers = new ConcurrentHashMap<>(1);
   private final Map<String, java.util.Set<String>> discoveredEndpoints =
     new ConcurrentHashMap<>(1);
 
@@ -65,6 +72,8 @@ public class KubernetesServiceDiscoveryService implements ApiService {
   private Environment environment;
   private KubernetesClient kubernetesClient;
   private long pendingRequestsTimeout;
+  private long resyncIntervalMs;
+  private long watchRetryDelayMs;
 
   public KubernetesServiceDiscoveryService(
     DeploymentContext deploymentContext
@@ -104,6 +113,16 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       Long.class,
       10_000L
     );
+    resyncIntervalMs = environment.getProperty(
+      RESYNC_INTERVAL_PROPERTY,
+      Long.class,
+      30_000L
+    );
+    watchRetryDelayMs = environment.getProperty(
+      WATCH_RETRY_DELAY_PROPERTY,
+      Long.class,
+      5_000L
+    );
 
     kubernetesClient = resolveKubernetesClient();
 
@@ -123,6 +142,7 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       api.getName()
     );
     watchers.values().forEach(Disposable::dispose);
+    resyncers.values().forEach(Disposable::dispose);
     discoveredEndpoints.clear();
 
     return Completable.complete();
@@ -189,6 +209,25 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       discoveredEndpoints
     );
 
+    ResourceQuery<Endpoints> listQuery = buildListQuery(
+      namespace,
+      configuration
+    );
+    WatchQuery<Event<Endpoints>> watchQuery = buildWatchQuery(
+      namespace,
+      configuration
+    );
+
+    listEndpoints(listQuery, namespace, configuration, handler);
+    startResync(group, listQuery, namespace, configuration, handler);
+
+    return watchEndpoints(watchQuery, listQuery, namespace, configuration, handler);
+  }
+
+  private ResourceQuery<Endpoints> buildListQuery(
+    String namespace,
+    KubernetesServiceDiscoveryServiceConfiguration configuration
+  ) {
     @SuppressWarnings("unchecked")
     ResourceQuery<Endpoints> listQuery = (ResourceQuery<
       Endpoints
@@ -196,7 +235,26 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       namespace,
       configuration.getService()
     ).build();
+    return listQuery;
+  }
 
+  private WatchQuery<Event<Endpoints>> buildWatchQuery(
+    String namespace,
+    KubernetesServiceDiscoveryServiceConfiguration configuration
+  ) {
+    return WatchQuery.endpoints()
+      .namespace(namespace)
+      .resource(configuration.getService())
+      .allowWatchBookmarks(true)
+      .build();
+  }
+
+  private void listEndpoints(
+    ResourceQuery<Endpoints> listQuery,
+    String namespace,
+    KubernetesServiceDiscoveryServiceConfiguration configuration,
+    KubernetesEventHandler handler
+  ) {
     kubernetesClient
       .get(listQuery)
       .subscribe(
@@ -212,30 +270,75 @@ public class KubernetesServiceDiscoveryService implements ApiService {
             throwable
           )
       );
+  }
 
-    WatchQuery<Event<Endpoints>> watchQuery = WatchQuery.endpoints()
-      .namespace(namespace)
-      .resource(configuration.getService())
-      .allowWatchBookmarks(true)
-      .build();
-
-    return kubernetesClient
-      .watch(watchQuery)
-      .subscribe(handler::handle, throwable -> {
-        if (throwable instanceof ResourceVersionNotFoundException) {
+  private void startResync(
+    EndpointGroup group,
+    ResourceQuery<Endpoints> listQuery,
+    String namespace,
+    KubernetesServiceDiscoveryServiceConfiguration configuration,
+    KubernetesEventHandler handler
+  ) {
+    if (resyncIntervalMs <= 0) {
+      return;
+    }
+    Disposable resync = Flowable.interval(
+      resyncIntervalMs,
+      resyncIntervalMs,
+      TimeUnit.MILLISECONDS
+    )
+      .subscribe(
+        tick -> listEndpoints(listQuery, namespace, configuration, handler),
+        throwable ->
           log.warn(
-            "Kubernetes resource version expired for service [{}] in namespace [{}]",
-            configuration.getService(),
-            namespace
-          );
-        } else {
-          log.error(
-            "Error while watching Kubernetes endpoints for service [{}] in namespace [{}]",
+            "Resync failed for service [{}] in namespace [{}]",
             configuration.getService(),
             namespace,
             throwable
+          )
+      );
+    resyncers.put(group.getName(), resync);
+  }
+
+  private Disposable watchEndpoints(
+    WatchQuery<Event<Endpoints>> watchQuery,
+    ResourceQuery<Endpoints> listQuery,
+    String namespace,
+    KubernetesServiceDiscoveryServiceConfiguration configuration,
+    KubernetesEventHandler handler
+  ) {
+    return kubernetesClient
+      .watch(watchQuery)
+      .retryWhen(errors ->
+        errors.flatMap(throwable -> {
+          if (throwable instanceof ResourceVersionNotFoundException) {
+            log.warn(
+              "Kubernetes resource version expired for service [{}] in namespace [{}], resyncing.",
+              configuration.getService(),
+              namespace
+            );
+          } else {
+            log.error(
+              "Error while watching Kubernetes endpoints for service [{}] in namespace [{}], retrying.",
+              configuration.getService(),
+              namespace,
+              throwable
+            );
+          }
+          listEndpoints(listQuery, namespace, configuration, handler);
+          return Flowable.timer(
+            Math.max(1000L, watchRetryDelayMs),
+            TimeUnit.MILLISECONDS
           );
-        }
-      });
+        })
+      )
+      .subscribe(handler::handle, throwable ->
+        log.error(
+          "Kubernetes endpoints watch terminated for service [{}] in namespace [{}]",
+          configuration.getService(),
+          namespace,
+          throwable
+        )
+      );
   }
 }
