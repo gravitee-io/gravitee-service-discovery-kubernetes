@@ -91,6 +91,33 @@ class KubernetesEventHandlerTest {
   }
 
   @Test
+  void should_remove_endpoints_on_modified_event_with_removed_addresses()
+    throws Exception {
+    RecordingEndpointManager manager = new RecordingEndpointManager();
+    KubernetesServiceDiscoveryServiceConfiguration config =
+      KubernetesServiceDiscoveryServiceConfiguration.builder()
+        .port(DEFAULT_PORT)
+        .build();
+
+    KubernetesEventHandler handler = createHandler(manager, config);
+    Endpoints endpoints = endpoints(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(endpoints));
+
+    handler.handle(
+      new Event<>(KubernetesEventType.MODIFIED.name(), endpointsEmpty())
+    );
+
+    Thread.sleep(50);
+
+    assertThat(manager.disabled).contains(
+      endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+    assertThat(manager.removed).contains(
+      endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+  }
+
+  @Test
   void should_add_all_ports_when_no_port_configured() {
     RecordingEndpointManager manager = new RecordingEndpointManager();
     KubernetesServiceDiscoveryServiceConfiguration config =
@@ -144,6 +171,10 @@ class KubernetesEventHandlerTest {
     Endpoints endpoints = new Endpoints();
     endpoints.setSubsets(Collections.singletonList(subset));
     return endpoints;
+  }
+
+  private static Endpoints endpointsEmpty() {
+    return new Endpoints();
   }
 
   private static class RecordingEndpointManager implements EndpointManager {

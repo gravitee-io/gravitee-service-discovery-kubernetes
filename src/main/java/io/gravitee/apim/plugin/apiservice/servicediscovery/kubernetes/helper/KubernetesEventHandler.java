@@ -96,13 +96,30 @@ public class KubernetesEventHandler {
       return;
     }
 
-    Set<String> next = endpointNames(event.getObject());
-    upsertFromEndpoints(event.getObject());
-    if (next.isEmpty()) {
-      // Avoid clearing endpoints when the update has no ready addresses.
+    if (KubernetesEventType.ADDED.name().equals(event.getType())) {
+      Set<String> next = endpointNames(event.getObject());
+      upsertFromEndpoints(event.getObject());
+      if (next.isEmpty()) {
+        // Avoid clearing endpoints when the add has no ready addresses.
+        return;
+      }
+      updateDiscovered(next);
       return;
     }
-    updateDiscovered(next);
+
+    if (KubernetesEventType.MODIFIED.name().equals(event.getType())) {
+      Set<String> next = endpointNames(event.getObject());
+      Set<String> previous = currentDiscovered();
+      Set<String> removed = new HashSet<>(previous);
+      removed.removeAll(next);
+
+      upsertFromEndpoints(event.getObject());
+      if (removed.isEmpty() && next.isEmpty()) {
+        // Avoid clearing endpoints when the update has no signal.
+        return;
+      }
+      updateDiscovered(next);
+    }
   }
 
   private Set<String> upsertFromEndpoints(Endpoints endpoints) {
