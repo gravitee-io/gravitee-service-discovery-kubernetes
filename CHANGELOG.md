@@ -1,3 +1,11 @@
+# [1.0.0-alpha.4](https://github.com/gravitee-io/gravitee-service-discovery-kubernetes/compare/1.0.0-alpha.3...1.0.0-alpha.4) (2026-01-27)
+
+
+### Bug Fixes
+
+* handle not-ready endpoints as removal signal ([2406291](https://github.com/gravitee-io/gravitee-service-discovery-kubernetes/commit/240629112fd9bba8c8c2ad160aa6b11420dc0a72))
+* react to modified endpoints by diffing ready addresses ([8af46a2](https://github.com/gravitee-io/gravitee-service-discovery-kubernetes/commit/8af46a2cae27244d435a4a125ca792617c00dc86))
+
 # [1.0.0-alpha.3](https://github.com/gravitee-io/gravitee-service-discovery-kubernetes/compare/1.0.0-alpha.2...1.0.0-alpha.3) (2026-01-21)
 
 
