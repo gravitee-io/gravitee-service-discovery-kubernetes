@@ -223,10 +223,11 @@ public class KubernetesEventHandler {
     boolean notReady
   ) {
     EndpointSliceConditions conditions = endpoint.getConditions();
-    if (conditions == null || conditions.getReady() == null) {
-      return !notReady;
+    Boolean ready = conditions == null ? null : conditions.getReady();
+    if (ready == null) {
+      return notReady;
     }
-    return notReady != Boolean.TRUE.equals(conditions.getReady());
+    return notReady != Boolean.TRUE.equals(ready);
   }
 
   private String sliceKey(EndpointSlice slice) {

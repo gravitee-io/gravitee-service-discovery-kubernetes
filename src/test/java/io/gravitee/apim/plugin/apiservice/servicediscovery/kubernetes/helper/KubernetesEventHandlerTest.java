@@ -184,8 +184,12 @@ class KubernetesEventHandlerTest {
   }
 
   private static EndpointSlice endpointSlice(String ip, int... ports) {
+    EndpointSliceConditions conditions = new EndpointSliceConditions();
+    conditions.setReady(true);
+
     EndpointSliceEndpoint endpoint = new EndpointSliceEndpoint();
     endpoint.setAddresses(List.of(ip));
+    endpoint.setConditions(conditions);
 
     List<EndpointSlicePort> endpointPorts = new ArrayList<>();
     for (int port : ports) {
