@@ -24,14 +24,13 @@ import io.gravitee.gateway.reactive.core.v4.endpoint.EndpointCriteria;
 import io.gravitee.gateway.reactive.core.v4.endpoint.EndpointManager;
 import io.gravitee.gateway.reactive.core.v4.endpoint.ManagedEndpoint;
 import io.gravitee.gateway.reactive.handlers.api.v4.Api;
-import io.gravitee.kubernetes.client.model.v1.EndpointAddress;
-import io.gravitee.kubernetes.client.model.v1.EndpointPort;
-import io.gravitee.kubernetes.client.model.v1.EndpointSubset;
-import io.gravitee.kubernetes.client.model.v1.Endpoints;
+import io.gravitee.kubernetes.client.model.v1.EndpointSlice;
+import io.gravitee.kubernetes.client.model.v1.EndpointSliceConditions;
+import io.gravitee.kubernetes.client.model.v1.EndpointSliceEndpoint;
+import io.gravitee.kubernetes.client.model.v1.EndpointSlicePort;
 import io.gravitee.kubernetes.client.model.v1.Event;
 import io.gravitee.kubernetes.client.model.v1.KubernetesEventType;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -59,7 +58,7 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    handler.handleSnapshot(List.of(endpoints(DEFAULT_IP, DEFAULT_PORT)));
+    handler.handleSnapshot(List.of(endpointSlice(DEFAULT_IP, DEFAULT_PORT)));
 
     assertThat(manager.endpoints).containsKey(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
@@ -75,10 +74,10 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    Endpoints endpoints = endpoints(DEFAULT_IP, DEFAULT_PORT);
-    handler.handleSnapshot(List.of(endpoints));
+    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice));
 
-    handler.handle(new Event<>(KubernetesEventType.DELETED.name(), endpoints));
+    handler.handle(new Event<>(KubernetesEventType.DELETED.name(), slice));
 
     Thread.sleep(50);
 
@@ -100,12 +99,11 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    Endpoints endpoints = endpoints(DEFAULT_IP, DEFAULT_PORT);
-    handler.handleSnapshot(List.of(endpoints));
+    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice));
 
-    handler.handle(
-      new Event<>(KubernetesEventType.MODIFIED.name(), endpointsEmpty())
-    );
+    EndpointSlice updated = endpointSlice("10.0.0.2", DEFAULT_PORT);
+    handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), updated));
 
     Thread.sleep(50);
 
@@ -114,6 +112,9 @@ class KubernetesEventHandlerTest {
     );
     assertThat(manager.removed).contains(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+    assertThat(manager.endpoints).containsKey(
+      endpointName("10.0.0.2", DEFAULT_PORT)
     );
   }
 
@@ -126,10 +127,10 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    Endpoints endpoints = endpoints(DEFAULT_IP, DEFAULT_PORT);
-    handler.handleSnapshot(List.of(endpoints));
+    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice));
 
-    Endpoints notReady = endpointsNotReady(DEFAULT_IP, DEFAULT_PORT);
+    EndpointSlice notReady = endpointSliceNotReady(DEFAULT_IP, DEFAULT_PORT);
     handler.handle(
       new Event<>(KubernetesEventType.MODIFIED.name(), notReady)
     );
@@ -151,7 +152,9 @@ class KubernetesEventHandlerTest {
       new KubernetesServiceDiscoveryServiceConfiguration();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    handler.handleSnapshot(List.of(endpoints(DEFAULT_IP, DEFAULT_PORT, 9090)));
+    handler.handleSnapshot(
+      List.of(endpointSlice(DEFAULT_IP, DEFAULT_PORT, 9090))
+    );
 
     assertThat(manager.endpoints)
       .containsKey(endpointName(DEFAULT_IP, DEFAULT_PORT))
@@ -180,48 +183,42 @@ class KubernetesEventHandlerTest {
     return "kubernetes#" + ip + "#" + port;
   }
 
-  private static Endpoints endpoints(String ip, int... ports) {
-    EndpointAddress address = new EndpointAddress();
-    address.setIp(ip);
+  private static EndpointSlice endpointSlice(String ip, int... ports) {
+    EndpointSliceEndpoint endpoint = new EndpointSliceEndpoint();
+    endpoint.setAddresses(List.of(ip));
 
-    List<EndpointPort> endpointPorts = new ArrayList<>();
+    List<EndpointSlicePort> endpointPorts = new ArrayList<>();
     for (int port : ports) {
-      EndpointPort endpointPort = new EndpointPort();
+      EndpointSlicePort endpointPort = new EndpointSlicePort();
       endpointPort.setPort(port);
       endpointPorts.add(endpointPort);
     }
 
-    EndpointSubset subset = new EndpointSubset();
-    subset.setAddresses(Collections.singletonList(address));
-    subset.setPorts(endpointPorts);
-
-    Endpoints endpoints = new Endpoints();
-    endpoints.setSubsets(Collections.singletonList(subset));
-    return endpoints;
+    EndpointSlice slice = new EndpointSlice();
+    slice.setEndpoints(List.of(endpoint));
+    slice.setPorts(endpointPorts);
+    return slice;
   }
 
-  private static Endpoints endpointsNotReady(String ip, int... ports) {
-    EndpointAddress address = new EndpointAddress();
-    address.setIp(ip);
+  private static EndpointSlice endpointSliceNotReady(String ip, int... ports) {
+    EndpointSliceConditions conditions = new EndpointSliceConditions();
+    conditions.setReady(false);
 
-    List<EndpointPort> endpointPorts = new ArrayList<>();
+    EndpointSliceEndpoint endpoint = new EndpointSliceEndpoint();
+    endpoint.setAddresses(List.of(ip));
+    endpoint.setConditions(conditions);
+
+    List<EndpointSlicePort> endpointPorts = new ArrayList<>();
     for (int port : ports) {
-      EndpointPort endpointPort = new EndpointPort();
+      EndpointSlicePort endpointPort = new EndpointSlicePort();
       endpointPort.setPort(port);
       endpointPorts.add(endpointPort);
     }
 
-    EndpointSubset subset = new EndpointSubset();
-    subset.setNotReadyAddresses(Collections.singletonList(address));
-    subset.setPorts(endpointPorts);
-
-    Endpoints endpoints = new Endpoints();
-    endpoints.setSubsets(Collections.singletonList(subset));
-    return endpoints;
-  }
-
-  private static Endpoints endpointsEmpty() {
-    return new Endpoints();
+    EndpointSlice slice = new EndpointSlice();
+    slice.setEndpoints(List.of(endpoint));
+    slice.setPorts(endpointPorts);
+    return slice;
   }
 
   private static class RecordingEndpointManager implements EndpointManager {

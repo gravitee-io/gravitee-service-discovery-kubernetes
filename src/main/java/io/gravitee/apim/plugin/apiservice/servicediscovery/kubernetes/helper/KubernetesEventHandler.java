@@ -21,13 +21,15 @@ import io.gravitee.definition.model.v4.endpointgroup.EndpointGroup;
 import io.gravitee.gateway.reactive.core.v4.endpoint.EndpointManager;
 import io.gravitee.gateway.reactive.handlers.api.v4.Api;
 import io.gravitee.kubernetes.client.model.v1.EndpointAddress;
-import io.gravitee.kubernetes.client.model.v1.EndpointPort;
-import io.gravitee.kubernetes.client.model.v1.EndpointSubset;
-import io.gravitee.kubernetes.client.model.v1.Endpoints;
+import io.gravitee.kubernetes.client.model.v1.EndpointSlice;
+import io.gravitee.kubernetes.client.model.v1.EndpointSliceConditions;
+import io.gravitee.kubernetes.client.model.v1.EndpointSliceEndpoint;
+import io.gravitee.kubernetes.client.model.v1.EndpointSlicePort;
 import io.gravitee.kubernetes.client.model.v1.Event;
 import io.gravitee.kubernetes.client.model.v1.KubernetesEventType;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +47,7 @@ public class KubernetesEventHandler {
   private final KubernetesServiceDiscoveryServiceConfiguration configuration;
   private final long pendingRequestsTimeout;
   private final Map<String, Set<String>> discoveredEndpoints;
+  private final Map<String, Set<String>> sliceEndpoints = new HashMap<>();
 
   public KubernetesEventHandler(
     Api api,
@@ -62,20 +65,25 @@ public class KubernetesEventHandler {
     this.discoveredEndpoints = discoveredEndpoints;
   }
 
-  public void handleSnapshot(List<Endpoints> endpointsList) {
+  public void handleSnapshot(List<EndpointSlice> endpointSlices) {
     log.debug(
       "Create endpoints from snapshot {} for api '{}'",
-      endpointsList,
+      endpointSlices,
       api.getName()
     );
-    Set<String> next = new HashSet<>();
+    sliceEndpoints.clear();
+
     Set<String> notReady = new HashSet<>();
-    endpointsList.forEach(endpoints ->
-      {
-        next.addAll(upsertFromEndpoints(endpoints));
-        notReady.addAll(notReadyEndpointNames(endpoints));
+    endpointSlices.forEach(slice -> {
+      String key = sliceKey(slice);
+      if (key == null) {
+        return;
       }
-    );
+      sliceEndpoints.put(key, upsertFromEndpointSlice(slice));
+      notReady.addAll(notReadyEndpointNames(slice));
+    });
+
+    Set<String> next = aggregateEndpoints();
     if (next.isEmpty() && notReady.isEmpty()) {
       // Avoid wiping all endpoints during transient empty snapshots with no signal.
       return;
@@ -83,7 +91,7 @@ public class KubernetesEventHandler {
     updateDiscovered(next);
   }
 
-  public void handle(Event<Endpoints> event) {
+  public void handle(Event<EndpointSlice> event) {
     log.debug("Handle event {} for api '{}'", event, api.getName());
 
     if (event == null || event.getObject() == null) {
@@ -94,17 +102,24 @@ public class KubernetesEventHandler {
     }
 
     if (KubernetesEventType.DELETED.name().equals(event.getType())) {
-      Set<String> next = new HashSet<>(currentDiscovered());
-      next.removeAll(endpointNames(event.getObject()));
-      next.removeAll(notReadyEndpointNames(event.getObject()));
+      String key = sliceKey(event.getObject());
+      if (key == null) {
+        return;
+      }
+      sliceEndpoints.remove(key);
+      Set<String> next = aggregateEndpoints();
       updateDiscovered(next);
       return;
     }
 
     if (KubernetesEventType.ADDED.name().equals(event.getType())) {
-      Set<String> next = endpointNames(event.getObject());
+      String key = sliceKey(event.getObject());
+      if (key == null) {
+        return;
+      }
       Set<String> notReady = notReadyEndpointNames(event.getObject());
-      upsertFromEndpoints(event.getObject());
+      sliceEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
+      Set<String> next = aggregateEndpoints();
       if (next.isEmpty() && notReady.isEmpty()) {
         // Avoid clearing endpoints when the add has no signal.
         return;
@@ -114,15 +129,14 @@ public class KubernetesEventHandler {
     }
 
     if (KubernetesEventType.MODIFIED.name().equals(event.getType())) {
-      Set<String> next = endpointNames(event.getObject());
+      String key = sliceKey(event.getObject());
+      if (key == null) {
+        return;
+      }
       Set<String> notReady = notReadyEndpointNames(event.getObject());
-      Set<String> previous = currentDiscovered();
-      Set<String> removed = new HashSet<>(previous);
-      removed.removeAll(next);
-      removed.removeAll(notReady);
-
-      upsertFromEndpoints(event.getObject());
-      if (removed.isEmpty() && next.isEmpty() && notReady.isEmpty()) {
+      sliceEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
+      Set<String> next = aggregateEndpoints();
+      if (next.isEmpty() && notReady.isEmpty()) {
         // Avoid clearing endpoints when the update has no signal.
         return;
       }
@@ -130,9 +144,9 @@ public class KubernetesEventHandler {
     }
   }
 
-  private Set<String> upsertFromEndpoints(Endpoints endpoints) {
+  private Set<String> upsertFromEndpointSlice(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(endpoints, false, (address, port) -> {
+    forEachEndpoint(slice, false, (address, port) -> {
       var endpoint = EndpointFactory.build(group, address, port, configuration);
       endpointManager.addOrUpdateEndpoint(group.getName(), endpoint);
       names.add(EndpointFactory.endpointName(address, port));
@@ -140,63 +154,103 @@ public class KubernetesEventHandler {
     return names;
   }
 
-  private Set<String> endpointNames(Endpoints endpoints) {
+  private Set<String> endpointNames(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(endpoints, false, (address, port) ->
+    forEachEndpoint(slice, false, (address, port) ->
       names.add(EndpointFactory.endpointName(address, port))
     );
     return names;
   }
 
-  private Set<String> notReadyEndpointNames(Endpoints endpoints) {
+  private Set<String> notReadyEndpointNames(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(endpoints, true, (address, port) ->
+    forEachEndpoint(slice, true, (address, port) ->
       names.add(EndpointFactory.endpointName(address, port))
     );
     return names;
   }
 
   private void forEachEndpoint(
-    Endpoints endpoints,
+    EndpointSlice slice,
     boolean notReady,
     EndpointConsumer consumer
   ) {
-    if (endpoints.getSubsets() == null) {
+    if (slice.getEndpoints() == null || slice.getPorts() == null) {
       return;
     }
 
     Integer configuredPort = configuration.getPort();
-    for (EndpointSubset subset : endpoints.getSubsets()) {
-      List<EndpointPort> ports = subset.getPorts();
-      List<EndpointAddress> addresses = notReady
-        ? subset.getNotReadyAddresses()
-        : subset.getAddresses();
-      if (ports == null || addresses == null) {
+    for (EndpointSliceEndpoint endpoint : slice.getEndpoints()) {
+      if (!matchesReadiness(endpoint, notReady)) {
+        continue;
+      }
+      List<String> addresses = endpoint.getAddresses();
+      if (addresses == null || addresses.isEmpty()) {
         continue;
       }
       if (configuredPort != null) {
-        if (!containsPort(ports, configuredPort)) {
+        if (!containsPort(slice.getPorts(), configuredPort)) {
           continue;
         }
-        for (EndpointAddress address : addresses) {
-          consumer.accept(address, configuredPort);
+        for (String address : addresses) {
+          consumer.accept(toEndpointAddress(address), configuredPort);
         }
-      } else {
-        for (EndpointPort port : ports) {
-          int resolvedPort = port.getPort();
-          if (resolvedPort <= 0) {
-            continue;
-          }
-          for (EndpointAddress address : addresses) {
-            consumer.accept(address, resolvedPort);
-          }
+        continue;
+      }
+      for (EndpointSlicePort port : slice.getPorts()) {
+        Integer resolvedPort = port.getPort();
+        if (resolvedPort == null || resolvedPort <= 0) {
+          continue;
+        }
+        for (String address : addresses) {
+          consumer.accept(toEndpointAddress(address), resolvedPort);
         }
       }
     }
   }
 
-  private boolean containsPort(List<EndpointPort> ports, int desiredPort) {
-    return ports.stream().anyMatch(port -> port.getPort() == desiredPort);
+  private boolean containsPort(
+    List<EndpointSlicePort> ports,
+    int desiredPort
+  ) {
+    return ports
+      .stream()
+      .anyMatch(port -> port.getPort() != null && port.getPort() == desiredPort);
+  }
+
+  private boolean matchesReadiness(
+    EndpointSliceEndpoint endpoint,
+    boolean notReady
+  ) {
+    EndpointSliceConditions conditions = endpoint.getConditions();
+    if (conditions == null || conditions.getReady() == null) {
+      return !notReady;
+    }
+    return notReady != Boolean.TRUE.equals(conditions.getReady());
+  }
+
+  private String sliceKey(EndpointSlice slice) {
+    if (slice.getMetadata() == null) {
+      return null;
+    }
+    String uid = slice.getMetadata().getUid();
+    if (uid != null && !uid.isBlank()) {
+      return uid;
+    }
+    String name = slice.getMetadata().getName();
+    return name == null || name.isBlank() ? null : name;
+  }
+
+  private EndpointAddress toEndpointAddress(String address) {
+    EndpointAddress endpointAddress = new EndpointAddress();
+    endpointAddress.setIp(address);
+    return endpointAddress;
+  }
+
+  private Set<String> aggregateEndpoints() {
+    Set<String> next = new HashSet<>();
+    sliceEndpoints.values().forEach(next::addAll);
+    return next;
   }
 
   private Set<String> currentDiscovered() {

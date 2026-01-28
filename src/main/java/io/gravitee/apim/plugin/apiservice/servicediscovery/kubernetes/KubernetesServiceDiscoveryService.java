@@ -25,11 +25,13 @@ import io.gravitee.gateway.reactive.api.helper.PluginConfigurationHelper;
 import io.gravitee.gateway.reactive.core.v4.endpoint.EndpointManager;
 import io.gravitee.gateway.reactive.handlers.api.v4.Api;
 import io.gravitee.kubernetes.client.KubernetesClient;
+import io.gravitee.kubernetes.client.api.LabelSelector;
 import io.gravitee.kubernetes.client.api.ResourceQuery;
 import io.gravitee.kubernetes.client.api.WatchQuery;
 import io.gravitee.kubernetes.client.exception.ResourceVersionNotFoundException;
 import io.gravitee.kubernetes.client.impl.KubernetesClientV1Impl;
-import io.gravitee.kubernetes.client.model.v1.Endpoints;
+import io.gravitee.kubernetes.client.model.v1.EndpointSlice;
+import io.gravitee.kubernetes.client.model.v1.EndpointSliceList;
 import io.gravitee.kubernetes.client.model.v1.Event;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.disposables.Disposable;
@@ -189,33 +191,41 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       discoveredEndpoints
     );
 
-    @SuppressWarnings("unchecked")
-    ResourceQuery<Endpoints> listQuery = (ResourceQuery<
-      Endpoints
-    >) (ResourceQuery<?>) ResourceQuery.endpoints(
-      namespace,
-      configuration.getService()
-    ).build();
+    ResourceQuery<EndpointSliceList> listQuery = ResourceQuery.endpointSlices(
+      namespace
+    )
+      .labelSelector(
+        LabelSelector.equals(
+          "kubernetes.io/service-name",
+          configuration.getService()
+        )
+      )
+      .build();
 
     kubernetesClient
       .get(listQuery)
       .subscribe(
-        endpoints ->
+        endpointSlices ->
           handler.handleSnapshot(
-            endpoints == null ? List.of() : List.of(endpoints)
+            endpointSlices == null ? List.of() : endpointSlices.getItems()
           ),
         throwable ->
           log.warn(
-            "Unable to list Kubernetes endpoints for service [{}] in namespace [{}]",
+            "Unable to list Kubernetes endpoint slices for service [{}] in namespace [{}]",
             configuration.getService(),
             namespace,
             throwable
           )
       );
 
-    WatchQuery<Event<Endpoints>> watchQuery = WatchQuery.endpoints()
+    WatchQuery<Event<EndpointSlice>> watchQuery = WatchQuery.endpointSlices()
       .namespace(namespace)
-      .resource(configuration.getService())
+      .labelSelector(
+        LabelSelector.equals(
+          "kubernetes.io/service-name",
+          configuration.getService()
+        )
+      )
       .allowWatchBookmarks(true)
       .build();
 
@@ -224,13 +234,13 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       .subscribe(handler::handle, throwable -> {
         if (throwable instanceof ResourceVersionNotFoundException) {
           log.warn(
-            "Kubernetes resource version expired for service [{}] in namespace [{}]",
+            "Kubernetes resource version expired for endpoint slices of service [{}] in namespace [{}]",
             configuration.getService(),
             namespace
           );
         } else {
           log.error(
-            "Error while watching Kubernetes endpoints for service [{}] in namespace [{}]",
+            "Error while watching Kubernetes endpoint slices for service [{}] in namespace [{}]",
             configuration.getService(),
             namespace,
             throwable

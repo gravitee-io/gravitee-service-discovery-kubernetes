@@ -29,11 +29,11 @@ import io.gravitee.kubernetes.client.KubernetesClient;
 import io.gravitee.kubernetes.client.api.ResourceQuery;
 import io.gravitee.kubernetes.client.config.KubernetesConfig;
 import io.gravitee.kubernetes.client.impl.KubernetesClientV1Impl;
-import io.gravitee.kubernetes.client.model.v1.Endpoints;
+import io.gravitee.kubernetes.client.api.LabelSelector;
+import io.gravitee.kubernetes.client.model.v1.EndpointSliceList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import mockwebserver3.MockResponse;
 import mockwebserver3.MockWebServer;
@@ -74,12 +74,15 @@ class KubernetesEndpointDiscoveryIntegrationTest {
 
     KubernetesClient client = new KubernetesClientV1Impl(config);
     @SuppressWarnings("unchecked")
-    ResourceQuery<Endpoints> query = (ResourceQuery<Endpoints>) (ResourceQuery<
-      ?
-    >) ResourceQuery.endpoints(DEFAULT_NAMESPACE, SERVICE_NAME).build();
-    Endpoints endpoints = client.get(query).blockingGet();
-    assertThat(endpoints).isNotNull();
-    assertThat(endpoints.getSubsets()).isNotNull();
+    ResourceQuery<EndpointSliceList> query =
+      ResourceQuery.endpointSlices(DEFAULT_NAMESPACE)
+        .labelSelector(
+          LabelSelector.equals("kubernetes.io/service-name", SERVICE_NAME)
+        )
+        .build();
+    EndpointSliceList slices = client.get(query).blockingGet();
+    assertThat(slices).isNotNull();
+    assertThat(slices.getItems()).isNotNull();
 
     EndpointGroup group = EndpointGroup.builder()
       .name(GROUP_NAME)
@@ -98,7 +101,7 @@ class KubernetesEndpointDiscoveryIntegrationTest {
       0,
       new ConcurrentHashMap<>()
     );
-    handler.handleSnapshot(List.of(endpoints));
+    handler.handleSnapshot(slices.getItems());
 
     assertThat(endpointManager.endpoints).containsKey(
       endpointName(ENDPOINT_IP, ENDPOINT_PORT)
@@ -108,11 +111,22 @@ class KubernetesEndpointDiscoveryIntegrationTest {
   private static String endpointsPayload() {
     return """
     {
-      "metadata": {"name": "my-service"},
-      "subsets": [
+      "apiVersion": "discovery.k8s.io/v1",
+      "kind": "EndpointSliceList",
+      "items": [
         {
-          "addresses": [{"ip": "10.0.0.1"}],
-          "ports": [{"port": 8080}]
+          "metadata": {
+            "name": "my-service-abc",
+            "labels": {"kubernetes.io/service-name": "my-service"}
+          },
+          "addressType": "IPv4",
+          "ports": [{"port": 8080, "protocol": "TCP"}],
+          "endpoints": [
+            {
+              "addresses": ["10.0.0.1"],
+              "conditions": {"ready": true}
+            }
+          ]
         }
       ]
     }
