@@ -131,9 +131,7 @@ class KubernetesEventHandlerTest {
     handler.handleSnapshot(List.of(slice));
 
     EndpointSlice notReady = endpointSliceNotReady(DEFAULT_IP, DEFAULT_PORT);
-    handler.handle(
-      new Event<>(KubernetesEventType.MODIFIED.name(), notReady)
-    );
+    handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), notReady));
 
     Thread.sleep(50);
 

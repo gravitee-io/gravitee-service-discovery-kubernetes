@@ -26,10 +26,10 @@ import io.gravitee.gateway.reactive.core.v4.endpoint.EndpointManager;
 import io.gravitee.gateway.reactive.core.v4.endpoint.ManagedEndpoint;
 import io.gravitee.gateway.reactive.handlers.api.v4.Api;
 import io.gravitee.kubernetes.client.KubernetesClient;
+import io.gravitee.kubernetes.client.api.LabelSelector;
 import io.gravitee.kubernetes.client.api.ResourceQuery;
 import io.gravitee.kubernetes.client.config.KubernetesConfig;
 import io.gravitee.kubernetes.client.impl.KubernetesClientV1Impl;
-import io.gravitee.kubernetes.client.api.LabelSelector;
 import io.gravitee.kubernetes.client.model.v1.EndpointSliceList;
 import java.util.HashMap;
 import java.util.List;
@@ -74,12 +74,13 @@ class KubernetesEndpointDiscoveryIntegrationTest {
 
     KubernetesClient client = new KubernetesClientV1Impl(config);
     @SuppressWarnings("unchecked")
-    ResourceQuery<EndpointSliceList> query =
-      ResourceQuery.endpointSlices(DEFAULT_NAMESPACE)
-        .labelSelector(
-          LabelSelector.equals("kubernetes.io/service-name", SERVICE_NAME)
-        )
-        .build();
+    ResourceQuery<EndpointSliceList> query = ResourceQuery.endpointSlices(
+      DEFAULT_NAMESPACE
+    )
+      .labelSelector(
+        LabelSelector.equals("kubernetes.io/service-name", SERVICE_NAME)
+      )
+      .build();
     EndpointSliceList slices = client.get(query).blockingGet();
     assertThat(slices).isNotNull();
     assertThat(slices.getItems()).isNotNull();

@@ -209,13 +209,12 @@ public class KubernetesEventHandler {
     }
   }
 
-  private boolean containsPort(
-    List<EndpointSlicePort> ports,
-    int desiredPort
-  ) {
+  private boolean containsPort(List<EndpointSlicePort> ports, int desiredPort) {
     return ports
       .stream()
-      .anyMatch(port -> port.getPort() != null && port.getPort() == desiredPort);
+      .anyMatch(
+        port -> port.getPort() != null && port.getPort() == desiredPort
+      );
   }
 
   private boolean matchesReadiness(
