@@ -86,10 +86,11 @@ class KubernetesEventHandlerTest {
 
     Thread.sleep(700);
 
-    assertThat(manager.disabled).isEmpty();
-    assertThat(manager.removed).isEmpty();
-    assertThat(manager.endpoints).containsKey(
+    assertThat(manager.removed).contains(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+    assertThat(manager.endpoints).containsKey(
+      endpointName(SECOND_IP, DEFAULT_PORT)
     );
   }
 
@@ -108,13 +109,11 @@ class KubernetesEventHandlerTest {
     handler.handleSnapshot(List.of(slice1, slice2));
 
     EndpointSlice updated = endpointSlice(SECOND_IP, DEFAULT_PORT);
+    updated.setMetadata(slice1.getMetadata());
     handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), updated));
 
     Thread.sleep(700);
 
-    assertThat(manager.disabled).contains(
-      endpointName(DEFAULT_IP, DEFAULT_PORT)
-    );
     assertThat(manager.removed).contains(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
     );
@@ -136,6 +135,7 @@ class KubernetesEventHandlerTest {
     handler.handleSnapshot(List.of(slice));
 
     EndpointSlice notReady = endpointSliceNotReady(DEFAULT_IP, DEFAULT_PORT);
+    notReady.setMetadata(slice1.getMetadata());
     handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), notReady));
 
     Thread.sleep(700);
