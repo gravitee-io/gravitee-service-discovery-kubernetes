@@ -43,16 +43,24 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class KubernetesEventHandler {
 
-  private static final long EMPTY_ENDPOINTS_HOLD_MS = 500L;
+  private static final long DEFAULT_EMPTY_ENDPOINTS_HOLD_MS = 300L;
+  private static final long DEFAULT_FALLBACK_TTL_MS = 30_000L;
+  private static final long DEFAULT_DRAIN_TTL_MS = 1000L;
 
   private final Api api;
   private final EndpointManager endpointManager;
   private final EndpointGroup group;
   private final KubernetesServiceDiscoveryServiceConfiguration configuration;
   private final long pendingRequestsTimeout;
+  private final long emptyEndpointsHoldMs;
+  private final long fallbackTtlMs;
+  private final long drainTtlMs;
   private final Map<String, Set<String>> discoveredEndpoints;
-  private final Map<String, Set<String>> sliceEndpoints = new HashMap<>();
+  private final Map<String, Set<String>> sliceReadyEndpoints = new HashMap<>();
+  private final Map<String, Set<String>> sliceDrainingEndpoints = new HashMap<>();
   private Set<String> lastNonEmptyReady = new HashSet<>();
+  private long lastNonEmptyReadyAt = 0L;
+  private long drainHoldUntilMs = 0L;
   private final AtomicLong emptyHoldSeq = new AtomicLong();
   private Disposable emptyHoldDisposable;
 
@@ -70,6 +78,18 @@ public class KubernetesEventHandler {
     this.configuration = configuration;
     this.pendingRequestsTimeout = pendingRequestsTimeout;
     this.discoveredEndpoints = discoveredEndpoints;
+    this.emptyEndpointsHoldMs = resolveOrDefault(
+      configuration.getEmptyHoldMs(),
+      DEFAULT_EMPTY_ENDPOINTS_HOLD_MS
+    );
+    this.fallbackTtlMs = resolveOrDefault(
+      configuration.getFallbackTtlMs(),
+      DEFAULT_FALLBACK_TTL_MS
+    );
+    this.drainTtlMs = resolveOrDefault(
+      configuration.getDrainTtlMs(),
+      DEFAULT_DRAIN_TTL_MS
+    );
   }
 
   public void handleSnapshot(List<EndpointSlice> endpointSlices) {
@@ -78,7 +98,8 @@ public class KubernetesEventHandler {
       endpointSlices,
       api.getName()
     );
-    sliceEndpoints.clear();
+    sliceReadyEndpoints.clear();
+    sliceDrainingEndpoints.clear();
 
     Set<String> notReady = new HashSet<>();
     endpointSlices.forEach(slice -> {
@@ -86,16 +107,18 @@ public class KubernetesEventHandler {
       if (key == null) {
         return;
       }
-      sliceEndpoints.put(key, upsertFromEndpointSlice(slice));
+      sliceReadyEndpoints.put(key, upsertFromEndpointSlice(slice));
+      sliceDrainingEndpoints.put(key, drainingEndpointNames(slice));
       notReady.addAll(notReadyEndpointNames(slice));
     });
 
-    Set<String> next = aggregateEndpoints();
-    if (next.isEmpty() && notReady.isEmpty()) {
+    Set<String> nextReady = aggregateReadyEndpoints();
+    Set<String> nextDraining = aggregateDrainingEndpoints();
+    if (nextReady.isEmpty() && nextDraining.isEmpty() && notReady.isEmpty()) {
       // Avoid wiping all endpoints during transient empty snapshots with no signal.
       return;
     }
-    applyDiscovered(next);
+    applyDiscovered(nextReady, nextDraining);
   }
 
   public void handle(Event<EndpointSlice> event) {
@@ -113,9 +136,11 @@ public class KubernetesEventHandler {
       if (key == null) {
         return;
       }
-      sliceEndpoints.remove(key);
-      Set<String> next = aggregateEndpoints();
-      applyDiscovered(next);
+      sliceReadyEndpoints.remove(key);
+      sliceDrainingEndpoints.remove(key);
+      Set<String> nextReady = aggregateReadyEndpoints();
+      Set<String> nextDraining = aggregateDrainingEndpoints();
+      applyDiscovered(nextReady, nextDraining);
       return;
     }
 
@@ -125,13 +150,22 @@ public class KubernetesEventHandler {
         return;
       }
       Set<String> notReady = notReadyEndpointNames(event.getObject());
-      sliceEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
-      Set<String> next = aggregateEndpoints();
-      if (next.isEmpty() && notReady.isEmpty()) {
+      sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
+      sliceDrainingEndpoints.put(
+        key,
+        drainingEndpointNames(event.getObject())
+      );
+      Set<String> nextReady = aggregateReadyEndpoints();
+      Set<String> nextDraining = aggregateDrainingEndpoints();
+      if (
+        nextReady.isEmpty() &&
+        nextDraining.isEmpty() &&
+        notReady.isEmpty()
+      ) {
         // Avoid clearing endpoints when the add has no signal.
         return;
       }
-      applyDiscovered(next);
+      applyDiscovered(nextReady, nextDraining);
       return;
     }
 
@@ -141,19 +175,28 @@ public class KubernetesEventHandler {
         return;
       }
       Set<String> notReady = notReadyEndpointNames(event.getObject());
-      sliceEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
-      Set<String> next = aggregateEndpoints();
-      if (next.isEmpty() && notReady.isEmpty()) {
+      sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
+      sliceDrainingEndpoints.put(
+        key,
+        drainingEndpointNames(event.getObject())
+      );
+      Set<String> nextReady = aggregateReadyEndpoints();
+      Set<String> nextDraining = aggregateDrainingEndpoints();
+      if (
+        nextReady.isEmpty() &&
+        nextDraining.isEmpty() &&
+        notReady.isEmpty()
+      ) {
         // Avoid clearing endpoints when the update has no signal.
         return;
       }
-      applyDiscovered(next);
+      applyDiscovered(nextReady, nextDraining);
     }
   }
 
   private Set<String> upsertFromEndpointSlice(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(slice, false, (address, port) -> {
+    forEachEndpoint(slice, EndpointState.READY, (address, port) -> {
       var endpoint = EndpointFactory.build(group, address, port, configuration);
       endpointManager.addOrUpdateEndpoint(group.getName(), endpoint);
       names.add(EndpointFactory.endpointName(address, port));
@@ -161,9 +204,9 @@ public class KubernetesEventHandler {
     return names;
   }
 
-  private Set<String> endpointNames(EndpointSlice slice) {
+  private Set<String> drainingEndpointNames(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(slice, false, (address, port) ->
+    forEachEndpoint(slice, EndpointState.DRAINING, (address, port) ->
       names.add(EndpointFactory.endpointName(address, port))
     );
     return names;
@@ -171,7 +214,7 @@ public class KubernetesEventHandler {
 
   private Set<String> notReadyEndpointNames(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(slice, true, (address, port) ->
+    forEachEndpoint(slice, EndpointState.NOT_READY, (address, port) ->
       names.add(EndpointFactory.endpointName(address, port))
     );
     return names;
@@ -179,7 +222,7 @@ public class KubernetesEventHandler {
 
   private void forEachEndpoint(
     EndpointSlice slice,
-    boolean notReady,
+    EndpointState desiredState,
     EndpointConsumer consumer
   ) {
     if (slice.getEndpoints() == null || slice.getPorts() == null) {
@@ -188,7 +231,7 @@ public class KubernetesEventHandler {
 
     Integer configuredPort = configuration.getPort();
     for (EndpointSliceEndpoint endpoint : slice.getEndpoints()) {
-      if (!matchesReadiness(endpoint, notReady)) {
+      if (classify(endpoint) != desiredState) {
         continue;
       }
       List<String> addresses = endpoint.getAddresses();
@@ -224,24 +267,23 @@ public class KubernetesEventHandler {
       );
   }
 
-  private boolean matchesReadiness(
-    EndpointSliceEndpoint endpoint,
-    boolean notReady
-  ) {
+  private EndpointState classify(EndpointSliceEndpoint endpoint) {
     EndpointSliceConditions conditions = endpoint.getConditions();
-    if (conditions != null) {
-      if (Boolean.TRUE.equals(conditions.getTerminating())) {
-        return notReady;
-      }
-      if (Boolean.FALSE.equals(conditions.getServing())) {
-        return notReady;
-      }
+    boolean serving =
+      conditions == null ||
+      conditions.getServing() == null ||
+      Boolean.TRUE.equals(conditions.getServing());
+    if (!serving) {
+      return EndpointState.NOT_READY;
+    }
+    boolean terminating =
+      conditions != null && Boolean.TRUE.equals(conditions.getTerminating());
+    if (terminating) {
+      return EndpointState.DRAINING;
     }
     Boolean ready = conditions == null ? null : conditions.getReady();
-    if (ready == null) {
-      return !notReady;
-    }
-    return notReady != Boolean.TRUE.equals(ready);
+    boolean isReady = ready == null || Boolean.TRUE.equals(ready);
+    return isReady ? EndpointState.READY : EndpointState.NOT_READY;
   }
 
   private String sliceKey(EndpointSlice slice) {
@@ -262,9 +304,51 @@ public class KubernetesEventHandler {
     return endpointAddress;
   }
 
-  private Set<String> aggregateEndpoints() {
+  private void ensureEndpointsPresent(Set<String> names) {
+    for (String name : names) {
+      EndpointDescriptor descriptor = parseEndpointName(name);
+      if (descriptor == null) {
+        continue;
+      }
+      var endpoint = EndpointFactory.build(
+        group,
+        toEndpointAddress(descriptor.address),
+        descriptor.port,
+        configuration
+      );
+      endpointManager.addOrUpdateEndpoint(group.getName(), endpoint);
+    }
+  }
+
+  private EndpointDescriptor parseEndpointName(String name) {
+    if (name == null || !name.startsWith("kubernetes#")) {
+      return null;
+    }
+    int lastSep = name.lastIndexOf('#');
+    if (lastSep <= "kubernetes#".length() || lastSep == name.length() - 1) {
+      return null;
+    }
+    String encodedIp = name.substring("kubernetes#".length(), lastSep);
+    String portRaw = name.substring(lastSep + 1);
+    int port;
+    try {
+      port = Integer.parseInt(portRaw);
+    } catch (NumberFormatException ex) {
+      return null;
+    }
+    String ip = encodedIp.replace("#", ":");
+    return new EndpointDescriptor(ip, port);
+  }
+
+  private Set<String> aggregateReadyEndpoints() {
     Set<String> next = new HashSet<>();
-    sliceEndpoints.values().forEach(next::addAll);
+    sliceReadyEndpoints.values().forEach(next::addAll);
+    return next;
+  }
+
+  private Set<String> aggregateDrainingEndpoints() {
+    Set<String> next = new HashSet<>();
+    sliceDrainingEndpoints.values().forEach(next::addAll);
     return next;
   }
 
@@ -274,36 +358,67 @@ public class KubernetesEventHandler {
     );
   }
 
-  private void applyDiscovered(Set<String> next) {
+  private void applyDiscovered(
+    Set<String> nextReady,
+    Set<String> nextDraining
+  ) {
     Set<String> previous = currentDiscovered();
-    if (!next.isEmpty()) {
-      lastNonEmptyReady = new HashSet<>(next);
+    if (!nextReady.isEmpty()) {
+      lastNonEmptyReady = new HashSet<>(nextReady);
+      lastNonEmptyReadyAt = System.currentTimeMillis();
+      drainHoldUntilMs = 0L;
       if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
         emptyHoldDisposable.dispose();
       }
-      updateDiscovered(next);
+      ensureEndpointsPresent(nextReady);
+      updateDiscovered(nextReady);
       return;
+    }
+
+    if (!nextDraining.isEmpty() && drainTtlMs > 0) {
+      long now = System.currentTimeMillis();
+      if (drainHoldUntilMs == 0L || now > drainHoldUntilMs) {
+        drainHoldUntilMs = now + drainTtlMs;
+      }
+      if (now <= drainHoldUntilMs) {
+        if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
+          emptyHoldDisposable.dispose();
+        }
+        ensureEndpointsPresent(nextDraining);
+        updateDiscovered(nextDraining);
+        return;
+      }
+    }
+
+    if (!lastNonEmptyReady.isEmpty()) {
+      if (fallbackTtlMs > 0 && lastNonEmptyReadyAt > 0) {
+        long ageMs = System.currentTimeMillis() - lastNonEmptyReadyAt;
+        if (ageMs > fallbackTtlMs) {
+          lastNonEmptyReady = new HashSet<>();
+        }
+      }
     }
     if (!lastNonEmptyReady.isEmpty()) {
       if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
         emptyHoldDisposable.dispose();
       }
+      ensureEndpointsPresent(lastNonEmptyReady);
       updateDiscovered(lastNonEmptyReady);
       return;
     }
-    if (next.isEmpty() && !previous.isEmpty()) {
+    if (nextReady.isEmpty() && nextDraining.isEmpty() && !previous.isEmpty()) {
       long seq = emptyHoldSeq.incrementAndGet();
       if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
         emptyHoldDisposable.dispose();
       }
       emptyHoldDisposable = Completable.timer(
-        EMPTY_ENDPOINTS_HOLD_MS,
+        emptyEndpointsHoldMs,
         TimeUnit.MILLISECONDS,
         Schedulers.io()
       )
         .doOnComplete(() -> {
           if (emptyHoldSeq.get() == seq) {
-            updateDiscovered(next);
+            updateDiscovered(new HashSet<>());
           }
         })
         .subscribe();
@@ -312,7 +427,7 @@ public class KubernetesEventHandler {
     if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
       emptyHoldDisposable.dispose();
     }
-    updateDiscovered(next);
+    updateDiscovered(new HashSet<>());
   }
 
   private void updateDiscovered(Set<String> next) {
@@ -334,6 +449,29 @@ public class KubernetesEventHandler {
       .subscribe();
 
     discoveredEndpoints.put(group.getName(), next);
+  }
+
+  private long resolveOrDefault(Long value, long fallback) {
+    if (value == null) {
+      return fallback;
+    }
+    return value;
+  }
+
+  private enum EndpointState {
+    READY,
+    DRAINING,
+    NOT_READY,
+  }
+
+  private static final class EndpointDescriptor {
+    private final String address;
+    private final int port;
+
+    private EndpointDescriptor(String address, int port) {
+      this.address = address;
+      this.port = port;
+    }
   }
 
   @FunctionalInterface

@@ -189,6 +189,25 @@ class KubernetesEventHandlerTest {
       .containsKey(endpointName(DEFAULT_IP, 9090));
   }
 
+  @Test
+  void should_use_terminating_endpoints_as_last_resort() {
+    RecordingEndpointManager manager = new RecordingEndpointManager();
+    KubernetesServiceDiscoveryServiceConfiguration config =
+      KubernetesServiceDiscoveryServiceConfiguration.builder()
+        .port(DEFAULT_PORT)
+        .drainTtlMs(1000L)
+        .build();
+
+    KubernetesEventHandler handler = createHandler(manager, config);
+    handler.handleSnapshot(
+      List.of(endpointSliceTerminating(DEFAULT_IP, DEFAULT_PORT))
+    );
+
+    assertThat(manager.endpoints).containsKey(
+      endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+  }
+
   private KubernetesEventHandler createHandler(
     RecordingEndpointManager manager,
     KubernetesServiceDiscoveryServiceConfiguration config
@@ -232,6 +251,29 @@ class KubernetesEventHandlerTest {
   private static EndpointSlice endpointSliceNotReady(String ip, int... ports) {
     EndpointSliceConditions conditions = new EndpointSliceConditions();
     conditions.setReady(false);
+
+    EndpointSliceEndpoint endpoint = new EndpointSliceEndpoint();
+    endpoint.setAddresses(List.of(ip));
+    endpoint.setConditions(conditions);
+
+    List<EndpointSlicePort> endpointPorts = new ArrayList<>();
+    for (int port : ports) {
+      EndpointSlicePort endpointPort = new EndpointSlicePort();
+      endpointPort.setPort(port);
+      endpointPorts.add(endpointPort);
+    }
+
+    EndpointSlice slice = new EndpointSlice();
+    slice.setEndpoints(List.of(endpoint));
+    slice.setPorts(endpointPorts);
+    slice.setMetadata(newSliceMeta());
+    return slice;
+  }
+
+  private static EndpointSlice endpointSliceTerminating(String ip, int... ports) {
+    EndpointSliceConditions conditions = new EndpointSliceConditions();
+    conditions.setServing(true);
+    conditions.setTerminating(true);
 
     EndpointSliceEndpoint endpoint = new EndpointSliceEndpoint();
     endpoint.setAddresses(List.of(ip));

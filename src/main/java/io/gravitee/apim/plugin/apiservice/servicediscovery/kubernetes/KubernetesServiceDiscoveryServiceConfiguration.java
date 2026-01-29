@@ -35,4 +35,19 @@ public class KubernetesServiceDiscoveryServiceConfiguration
   private Integer port;
   private String scheme;
   private String path;
+  /**
+   * How long to delay clearing endpoints when an update reports no endpoints.
+   * A short hold avoids transient empty snapshots from causing 503s.
+   */
+  private Long emptyHoldMs;
+  /**
+   * How long to reuse the last known ready endpoints when discovery is empty.
+   * Set to 0 or null to disable expiry (infinite).
+   */
+  private Long fallbackTtlMs;
+  /**
+   * How long to use terminating endpoints as a last-resort when no ready endpoints exist.
+   * Set to 0 or null to disable draining fallback.
+   */
+  private Long drainTtlMs;
 }
