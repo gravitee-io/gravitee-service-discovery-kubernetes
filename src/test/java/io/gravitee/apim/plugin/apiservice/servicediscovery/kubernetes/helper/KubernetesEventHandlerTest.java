@@ -79,7 +79,7 @@ class KubernetesEventHandlerTest {
     EndpointSlice slice2 = endpointSlice(SECOND_IP, DEFAULT_PORT);
     handler.handleSnapshot(List.of(slice1, slice2));
 
-    handler.handle(new Event<>(KubernetesEventType.DELETED.name(), slice));
+    handler.handle(new Event<>(KubernetesEventType.DELETED.name(), slice1));
 
     Thread.sleep(700);
 
