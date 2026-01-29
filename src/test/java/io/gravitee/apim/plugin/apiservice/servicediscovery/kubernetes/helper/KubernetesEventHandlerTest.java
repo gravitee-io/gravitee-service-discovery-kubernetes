@@ -131,8 +131,9 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
-    handler.handleSnapshot(List.of(slice));
+    EndpointSlice slice1 = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    EndpointSlice slice2 = endpointSlice(SECOND_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice1, slice2));
 
     EndpointSlice notReady = endpointSliceNotReady(DEFAULT_IP, DEFAULT_PORT);
     notReady.setMetadata(slice1.getMetadata());
