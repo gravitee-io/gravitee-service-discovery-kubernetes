@@ -270,7 +270,10 @@ class KubernetesEventHandlerTest {
     return slice;
   }
 
-  private static EndpointSlice endpointSliceTerminating(String ip, int... ports) {
+  private static EndpointSlice endpointSliceTerminating(
+    String ip,
+    int... ports
+  ) {
     EndpointSliceConditions conditions = new EndpointSliceConditions();
     conditions.setServing(true);
     conditions.setTerminating(true);

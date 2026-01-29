@@ -57,7 +57,8 @@ public class KubernetesEventHandler {
   private final long drainTtlMs;
   private final Map<String, Set<String>> discoveredEndpoints;
   private final Map<String, Set<String>> sliceReadyEndpoints = new HashMap<>();
-  private final Map<String, Set<String>> sliceDrainingEndpoints = new HashMap<>();
+  private final Map<String, Set<String>> sliceDrainingEndpoints =
+    new HashMap<>();
   private Set<String> lastNonEmptyReady = new HashSet<>();
   private long lastNonEmptyReadyAt = 0L;
   private long drainHoldUntilMs = 0L;
@@ -151,17 +152,10 @@ public class KubernetesEventHandler {
       }
       Set<String> notReady = notReadyEndpointNames(event.getObject());
       sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
-      sliceDrainingEndpoints.put(
-        key,
-        drainingEndpointNames(event.getObject())
-      );
+      sliceDrainingEndpoints.put(key, drainingEndpointNames(event.getObject()));
       Set<String> nextReady = aggregateReadyEndpoints();
       Set<String> nextDraining = aggregateDrainingEndpoints();
-      if (
-        nextReady.isEmpty() &&
-        nextDraining.isEmpty() &&
-        notReady.isEmpty()
-      ) {
+      if (nextReady.isEmpty() && nextDraining.isEmpty() && notReady.isEmpty()) {
         // Avoid clearing endpoints when the add has no signal.
         return;
       }
@@ -176,17 +170,10 @@ public class KubernetesEventHandler {
       }
       Set<String> notReady = notReadyEndpointNames(event.getObject());
       sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
-      sliceDrainingEndpoints.put(
-        key,
-        drainingEndpointNames(event.getObject())
-      );
+      sliceDrainingEndpoints.put(key, drainingEndpointNames(event.getObject()));
       Set<String> nextReady = aggregateReadyEndpoints();
       Set<String> nextDraining = aggregateDrainingEndpoints();
-      if (
-        nextReady.isEmpty() &&
-        nextDraining.isEmpty() &&
-        notReady.isEmpty()
-      ) {
+      if (nextReady.isEmpty() && nextDraining.isEmpty() && notReady.isEmpty()) {
         // Avoid clearing endpoints when the update has no signal.
         return;
       }
@@ -465,6 +452,7 @@ public class KubernetesEventHandler {
   }
 
   private static final class EndpointDescriptor {
+
     private final String address;
     private final int port;
 
