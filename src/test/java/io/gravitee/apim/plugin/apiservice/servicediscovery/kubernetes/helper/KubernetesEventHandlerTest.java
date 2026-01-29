@@ -30,12 +30,14 @@ import io.gravitee.kubernetes.client.model.v1.EndpointSliceEndpoint;
 import io.gravitee.kubernetes.client.model.v1.EndpointSlicePort;
 import io.gravitee.kubernetes.client.model.v1.Event;
 import io.gravitee.kubernetes.client.model.v1.KubernetesEventType;
+import io.gravitee.kubernetes.client.model.v1.ObjectMeta;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class KubernetesEventHandlerTest {
@@ -45,6 +47,7 @@ class KubernetesEventHandlerTest {
   private static final String DEFAULT_IP = "10.0.0.1";
   private static final String SECOND_IP = "10.0.0.2";
   private static final int DEFAULT_PORT = 8080;
+  private static final AtomicInteger SLICE_SEQ = new AtomicInteger();
 
   private final Api api = new Api(
     io.gravitee.definition.model.v4.Api.builder().name("my-api").build()
@@ -221,6 +224,7 @@ class KubernetesEventHandlerTest {
     EndpointSlice slice = new EndpointSlice();
     slice.setEndpoints(List.of(endpoint));
     slice.setPorts(endpointPorts);
+    slice.setMetadata(newSliceMeta());
     return slice;
   }
 
@@ -242,7 +246,14 @@ class KubernetesEventHandlerTest {
     EndpointSlice slice = new EndpointSlice();
     slice.setEndpoints(List.of(endpoint));
     slice.setPorts(endpointPorts);
+    slice.setMetadata(newSliceMeta());
     return slice;
+  }
+
+  private static ObjectMeta newSliceMeta() {
+    ObjectMeta meta = new ObjectMeta();
+    meta.setName("slice-" + SLICE_SEQ.incrementAndGet());
+    return meta;
   }
 
   private static class RecordingEndpointManager implements EndpointManager {
