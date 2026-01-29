@@ -28,6 +28,7 @@ import io.gravitee.kubernetes.client.model.v1.EndpointSlicePort;
 import io.gravitee.kubernetes.client.model.v1.Event;
 import io.gravitee.kubernetes.client.model.v1.KubernetesEventType;
 import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,11 +36,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import lombok.CustomLog;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class KubernetesEventHandler {
+
+  private static final long EMPTY_ENDPOINTS_HOLD_MS = 500L;
 
   private final Api api;
   private final EndpointManager endpointManager;
@@ -48,6 +52,9 @@ public class KubernetesEventHandler {
   private final long pendingRequestsTimeout;
   private final Map<String, Set<String>> discoveredEndpoints;
   private final Map<String, Set<String>> sliceEndpoints = new HashMap<>();
+  private Set<String> lastNonEmptyReady = new HashSet<>();
+  private final AtomicLong emptyHoldSeq = new AtomicLong();
+  private Disposable emptyHoldDisposable;
 
   public KubernetesEventHandler(
     Api api,
@@ -88,7 +95,7 @@ public class KubernetesEventHandler {
       // Avoid wiping all endpoints during transient empty snapshots with no signal.
       return;
     }
-    updateDiscovered(next);
+    applyDiscovered(next);
   }
 
   public void handle(Event<EndpointSlice> event) {
@@ -108,7 +115,7 @@ public class KubernetesEventHandler {
       }
       sliceEndpoints.remove(key);
       Set<String> next = aggregateEndpoints();
-      updateDiscovered(next);
+      applyDiscovered(next);
       return;
     }
 
@@ -124,7 +131,7 @@ public class KubernetesEventHandler {
         // Avoid clearing endpoints when the add has no signal.
         return;
       }
-      updateDiscovered(next);
+      applyDiscovered(next);
       return;
     }
 
@@ -140,7 +147,7 @@ public class KubernetesEventHandler {
         // Avoid clearing endpoints when the update has no signal.
         return;
       }
-      updateDiscovered(next);
+      applyDiscovered(next);
     }
   }
 
@@ -222,6 +229,14 @@ public class KubernetesEventHandler {
     boolean notReady
   ) {
     EndpointSliceConditions conditions = endpoint.getConditions();
+    if (conditions != null) {
+      if (Boolean.TRUE.equals(conditions.getTerminating())) {
+        return notReady;
+      }
+      if (Boolean.FALSE.equals(conditions.getServing())) {
+        return notReady;
+      }
+    }
     Boolean ready = conditions == null ? null : conditions.getReady();
     if (ready == null) {
       return !notReady;
@@ -257,6 +272,47 @@ public class KubernetesEventHandler {
     return new HashSet<>(
       discoveredEndpoints.getOrDefault(group.getName(), new HashSet<>())
     );
+  }
+
+  private void applyDiscovered(Set<String> next) {
+    Set<String> previous = currentDiscovered();
+    if (!next.isEmpty()) {
+      lastNonEmptyReady = new HashSet<>(next);
+      if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
+        emptyHoldDisposable.dispose();
+      }
+      updateDiscovered(next);
+      return;
+    }
+    if (!lastNonEmptyReady.isEmpty()) {
+      if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
+        emptyHoldDisposable.dispose();
+      }
+      updateDiscovered(lastNonEmptyReady);
+      return;
+    }
+    if (next.isEmpty() && !previous.isEmpty()) {
+      long seq = emptyHoldSeq.incrementAndGet();
+      if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
+        emptyHoldDisposable.dispose();
+      }
+      emptyHoldDisposable = Completable.timer(
+        EMPTY_ENDPOINTS_HOLD_MS,
+        TimeUnit.MILLISECONDS,
+        Schedulers.io()
+      )
+        .doOnComplete(() -> {
+          if (emptyHoldSeq.get() == seq) {
+            updateDiscovered(next);
+          }
+        })
+        .subscribe();
+      return;
+    }
+    if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
+      emptyHoldDisposable.dispose();
+    }
+    updateDiscovered(next);
   }
 
   private void updateDiscovered(Set<String> next) {

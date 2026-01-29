@@ -43,6 +43,7 @@ class KubernetesEventHandlerTest {
   private static final String GROUP_NAME = "default";
   private static final String GROUP_TYPE = "http-proxy";
   private static final String DEFAULT_IP = "10.0.0.1";
+  private static final String SECOND_IP = "10.0.0.2";
   private static final int DEFAULT_PORT = 8080;
 
   private final Api api = new Api(
@@ -74,17 +75,17 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
-    handler.handleSnapshot(List.of(slice));
+    EndpointSlice slice1 = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    EndpointSlice slice2 = endpointSlice(SECOND_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice1, slice2));
 
     handler.handle(new Event<>(KubernetesEventType.DELETED.name(), slice));
 
-    Thread.sleep(50);
+    Thread.sleep(700);
 
-    assertThat(manager.disabled).contains(
-      endpointName(DEFAULT_IP, DEFAULT_PORT)
-    );
-    assertThat(manager.removed).contains(
+    assertThat(manager.disabled).isEmpty();
+    assertThat(manager.removed).isEmpty();
+    assertThat(manager.endpoints).containsKey(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
     );
   }
@@ -99,13 +100,14 @@ class KubernetesEventHandlerTest {
         .build();
 
     KubernetesEventHandler handler = createHandler(manager, config);
-    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
-    handler.handleSnapshot(List.of(slice));
+    EndpointSlice slice1 = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    EndpointSlice slice2 = endpointSlice(SECOND_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice1, slice2));
 
-    EndpointSlice updated = endpointSlice("10.0.0.2", DEFAULT_PORT);
+    EndpointSlice updated = endpointSlice(SECOND_IP, DEFAULT_PORT);
     handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), updated));
 
-    Thread.sleep(50);
+    Thread.sleep(700);
 
     assertThat(manager.disabled).contains(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
@@ -114,7 +116,7 @@ class KubernetesEventHandlerTest {
       endpointName(DEFAULT_IP, DEFAULT_PORT)
     );
     assertThat(manager.endpoints).containsKey(
-      endpointName("10.0.0.2", DEFAULT_PORT)
+      endpointName(SECOND_IP, DEFAULT_PORT)
     );
   }
 
@@ -133,12 +135,36 @@ class KubernetesEventHandlerTest {
     EndpointSlice notReady = endpointSliceNotReady(DEFAULT_IP, DEFAULT_PORT);
     handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), notReady));
 
-    Thread.sleep(50);
+    Thread.sleep(700);
 
-    assertThat(manager.disabled).contains(
+    assertThat(manager.removed).contains(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
     );
-    assertThat(manager.removed).contains(
+    assertThat(manager.endpoints).containsKey(
+      endpointName(SECOND_IP, DEFAULT_PORT)
+    );
+  }
+
+  @Test
+  void should_keep_last_known_endpoints_when_all_not_ready() throws Exception {
+    RecordingEndpointManager manager = new RecordingEndpointManager();
+    KubernetesServiceDiscoveryServiceConfiguration config =
+      KubernetesServiceDiscoveryServiceConfiguration.builder()
+        .port(DEFAULT_PORT)
+        .build();
+
+    KubernetesEventHandler handler = createHandler(manager, config);
+    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice));
+
+    EndpointSlice notReady = endpointSliceNotReady(DEFAULT_IP, DEFAULT_PORT);
+    handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), notReady));
+
+    Thread.sleep(700);
+
+    assertThat(manager.disabled).isEmpty();
+    assertThat(manager.removed).isEmpty();
+    assertThat(manager.endpoints).containsKey(
       endpointName(DEFAULT_IP, DEFAULT_PORT)
     );
   }
