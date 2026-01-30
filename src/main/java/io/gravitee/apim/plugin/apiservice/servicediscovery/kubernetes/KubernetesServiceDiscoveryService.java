@@ -57,6 +57,14 @@ public class KubernetesServiceDiscoveryService implements ApiService {
   private final Map<String, Disposable> watchers = new ConcurrentHashMap<>(1);
   private final Map<String, java.util.Set<String>> discoveredEndpoints =
     new ConcurrentHashMap<>(1);
+  private final Map<
+    String,
+    KubernetesServiceDiscoveryServiceConfiguration
+  > groupConfigs = new ConcurrentHashMap<>(1);
+  private final Map<
+    String,
+    java.util.concurrent.atomic.AtomicInteger
+  > retryCounters = new ConcurrentHashMap<>(1);
 
   private final DeploymentContext deploymentContext;
   private final List<EndpointGroup> kubernetesEnabledGroups;
@@ -126,6 +134,8 @@ public class KubernetesServiceDiscoveryService implements ApiService {
     );
     watchers.values().forEach(Disposable::dispose);
     discoveredEndpoints.clear();
+    groupConfigs.clear();
+    retryCounters.clear();
 
     return Completable.complete();
   }
@@ -146,6 +156,7 @@ public class KubernetesServiceDiscoveryService implements ApiService {
         return;
       }
 
+      groupConfigs.put(group.getName(), config);
       watchers.computeIfAbsent(group.getName(), groupName ->
         initWatcher(group, config)
       );
@@ -179,6 +190,7 @@ public class KubernetesServiceDiscoveryService implements ApiService {
     EndpointGroup group,
     KubernetesServiceDiscoveryServiceConfiguration configuration
   ) {
+    String groupName = group.getName();
     String namespace = KubernetesServiceDiscoveryServiceHelper.resolveNamespace(
       configuration
     );
@@ -205,10 +217,12 @@ public class KubernetesServiceDiscoveryService implements ApiService {
     kubernetesClient
       .get(listQuery)
       .subscribe(
-        endpointSlices ->
+        endpointSlices -> {
           handler.handleSnapshot(
             endpointSlices == null ? List.of() : endpointSlices.getItems()
-          ),
+          );
+          resetRetryCounter(groupName);
+        },
         throwable ->
           log.warn(
             "Unable to list Kubernetes endpoint slices for service [{}] in namespace [{}]",
@@ -246,6 +260,51 @@ public class KubernetesServiceDiscoveryService implements ApiService {
             throwable
           );
         }
+        scheduleWatchRestart(group);
       });
+  }
+
+  private void scheduleWatchRestart(EndpointGroup group) {
+    String groupName = group.getName();
+    KubernetesServiceDiscoveryServiceConfiguration configuration =
+      groupConfigs.get(groupName);
+    if (configuration == null) {
+      return;
+    }
+    int attempt = retryCounters
+      .computeIfAbsent(groupName, key ->
+        new java.util.concurrent.atomic.AtomicInteger()
+      )
+      .incrementAndGet();
+    long delayMs = computeBackoffDelayMs(attempt);
+
+    Completable.timer(
+      delayMs,
+      java.util.concurrent.TimeUnit.MILLISECONDS,
+      io.reactivex.rxjava3.schedulers.Schedulers.io()
+    ).subscribe(() ->
+      watchers.compute(groupName, (key, existing) -> {
+        if (existing != null && !existing.isDisposed()) {
+          existing.dispose();
+        }
+        return initWatcher(group, configuration);
+      })
+    );
+  }
+
+  private void resetRetryCounter(String groupName) {
+    java.util.concurrent.atomic.AtomicInteger counter = retryCounters.get(
+      groupName
+    );
+    if (counter != null) {
+      counter.set(0);
+    }
+  }
+
+  private long computeBackoffDelayMs(int attempt) {
+    int capped = Math.min(attempt, 5);
+    long base = 1000L;
+    long delay = base * (1L << (capped - 1));
+    return Math.min(delay, 30_000L);
   }
 }
