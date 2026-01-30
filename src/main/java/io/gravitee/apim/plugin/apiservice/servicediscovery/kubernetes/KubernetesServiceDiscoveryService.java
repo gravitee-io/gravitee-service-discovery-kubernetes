@@ -53,8 +53,12 @@ public class KubernetesServiceDiscoveryService implements ApiService {
   public static final String PENDING_REQUESTS_TIMEOUT_PROPERTY =
     "api.pending_requests_timeout";
   private static final String SERVICE_DISCOVERY_KIND = "service-discovery";
+  private static final String ENDPOINT_SLICE_SERVICE_LABEL =
+    "kubernetes.io/service-name";
+  private static final long REFRESH_INTERVAL_MS = 3 * 60 * 1000L;
 
   private final Map<String, Disposable> watchers = new ConcurrentHashMap<>(1);
+  private final Map<String, Disposable> refreshers = new ConcurrentHashMap<>(1);
   private final Map<String, java.util.Set<String>> discoveredEndpoints =
     new ConcurrentHashMap<>(1);
   private final Map<
@@ -133,6 +137,7 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       api.getName()
     );
     watchers.values().forEach(Disposable::dispose);
+    refreshers.values().forEach(Disposable::dispose);
     discoveredEndpoints.clear();
     groupConfigs.clear();
     retryCounters.clear();
@@ -208,7 +213,7 @@ public class KubernetesServiceDiscoveryService implements ApiService {
     )
       .labelSelector(
         LabelSelector.equals(
-          "kubernetes.io/service-name",
+          ENDPOINT_SLICE_SERVICE_LABEL,
           configuration.getService()
         )
       )
@@ -236,14 +241,14 @@ public class KubernetesServiceDiscoveryService implements ApiService {
       .namespace(namespace)
       .labelSelector(
         LabelSelector.equals(
-          "kubernetes.io/service-name",
+          ENDPOINT_SLICE_SERVICE_LABEL,
           configuration.getService()
         )
       )
       .allowWatchBookmarks(true)
       .build();
 
-    return kubernetesClient
+    Disposable watchDisposable = kubernetesClient
       .watch(watchQuery)
       .subscribe(handler::handle, throwable -> {
         if (throwable instanceof ResourceVersionNotFoundException) {
@@ -262,6 +267,48 @@ public class KubernetesServiceDiscoveryService implements ApiService {
         }
         scheduleWatchRestart(group);
       });
+
+    refreshers.compute(groupName, (key, existing) -> {
+      if (existing != null && !existing.isDisposed()) {
+        existing.dispose();
+      }
+      return schedulePeriodicRefresh(handler, listQuery, groupName);
+    });
+
+    return watchDisposable;
+  }
+
+  private Disposable schedulePeriodicRefresh(
+    KubernetesEventHandler handler,
+    ResourceQuery<EndpointSliceList> listQuery,
+    String groupName
+  ) {
+    return io.reactivex.rxjava3.core.Flowable.interval(
+      REFRESH_INTERVAL_MS,
+      REFRESH_INTERVAL_MS,
+      java.util.concurrent.TimeUnit.MILLISECONDS,
+      io.reactivex.rxjava3.schedulers.Schedulers.io()
+    ).subscribe(
+      tick ->
+        kubernetesClient
+          .get(listQuery)
+          .subscribe(
+            endpointSlices -> {
+              handler.handleSnapshot(
+                endpointSlices == null ? List.of() : endpointSlices.getItems()
+              );
+              resetRetryCounter(groupName);
+            },
+            throwable ->
+              log.warn(
+                "Unable to refresh Kubernetes endpoint slices for group [{}]",
+                groupName,
+                throwable
+              )
+          ),
+      throwable ->
+        log.warn("Periodic refresh failed for group [{}]", groupName, throwable)
+    );
   }
 
   private void scheduleWatchRestart(EndpointGroup group) {

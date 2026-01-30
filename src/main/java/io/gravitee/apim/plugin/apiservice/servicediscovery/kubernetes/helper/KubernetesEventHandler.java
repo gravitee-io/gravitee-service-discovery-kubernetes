@@ -46,6 +46,7 @@ public class KubernetesEventHandler {
   private static final long DEFAULT_EMPTY_ENDPOINTS_HOLD_MS = 300L;
   private static final long DEFAULT_FALLBACK_TTL_MS = 30_000L;
   private static final long DEFAULT_DRAIN_TTL_MS = 1000L;
+  private static final long DEFAULT_COALESCE_WINDOW_MS = 200L;
 
   private final Api api;
   private final EndpointManager endpointManager;
@@ -59,11 +60,18 @@ public class KubernetesEventHandler {
   private final Map<String, Set<String>> sliceReadyEndpoints = new HashMap<>();
   private final Map<String, Set<String>> sliceDrainingEndpoints =
     new HashMap<>();
+  private final Map<String, EndpointSlice> lastSlices = new HashMap<>();
   private Set<String> lastNonEmptyReady = new HashSet<>();
   private long lastNonEmptyReadyAt = 0L;
   private long drainHoldUntilMs = 0L;
   private final AtomicLong emptyHoldSeq = new AtomicLong();
   private Disposable emptyHoldDisposable;
+  private final Object eventLock = new Object();
+  private final Map<String, Event<EndpointSlice>> pendingEvents =
+    new HashMap<>();
+  private final AtomicLong flushSeq = new AtomicLong();
+  private Disposable flushDisposable;
+  private final long coalesceWindowMs = DEFAULT_COALESCE_WINDOW_MS;
 
   public KubernetesEventHandler(
     Api api,
@@ -101,6 +109,7 @@ public class KubernetesEventHandler {
     );
     sliceReadyEndpoints.clear();
     sliceDrainingEndpoints.clear();
+    lastSlices.clear();
 
     Set<String> notReady = new HashSet<>();
     endpointSlices.forEach(slice -> {
@@ -108,6 +117,7 @@ public class KubernetesEventHandler {
       if (key == null) {
         return;
       }
+      lastSlices.put(key, slice);
       sliceReadyEndpoints.put(key, upsertFromEndpointSlice(slice));
       sliceDrainingEndpoints.put(key, drainingEndpointNames(slice));
       notReady.addAll(notReadyEndpointNames(slice));
@@ -123,6 +133,52 @@ public class KubernetesEventHandler {
   }
 
   public void handle(Event<EndpointSlice> event) {
+    if (coalesceWindowMs <= 0) {
+      handleImmediate(event);
+      return;
+    }
+    if (event == null || event.getObject() == null) {
+      return;
+    }
+    if (KubernetesEventType.BOOKMARK.name().equals(event.getType())) {
+      return;
+    }
+    String key = sliceKey(event.getObject());
+    if (key == null) {
+      return;
+    }
+    synchronized (eventLock) {
+      pendingEvents.put(key, event);
+      long seq = flushSeq.incrementAndGet();
+      if (flushDisposable != null && !flushDisposable.isDisposed()) {
+        flushDisposable.dispose();
+      }
+      flushDisposable = Completable.timer(
+        coalesceWindowMs,
+        TimeUnit.MILLISECONDS,
+        Schedulers.io()
+      )
+        .doOnComplete(() -> flushPending(seq))
+        .subscribe();
+    }
+  }
+
+  private void flushPending(long seq) {
+    Map<String, Event<EndpointSlice>> events;
+    synchronized (eventLock) {
+      if (flushSeq.get() != seq) {
+        return;
+      }
+      events = new HashMap<>(pendingEvents);
+      pendingEvents.clear();
+      if (flushDisposable != null && !flushDisposable.isDisposed()) {
+        flushDisposable.dispose();
+      }
+    }
+    events.values().forEach(this::handleImmediate);
+  }
+
+  private void handleImmediate(Event<EndpointSlice> event) {
     log.debug("Handle event {} for api '{}'", event, api.getName());
 
     if (event == null || event.getObject() == null) {
@@ -139,35 +195,28 @@ public class KubernetesEventHandler {
       }
       sliceReadyEndpoints.remove(key);
       sliceDrainingEndpoints.remove(key);
+      lastSlices.remove(key);
       Set<String> nextReady = aggregateReadyEndpoints();
       Set<String> nextDraining = aggregateDrainingEndpoints();
       applyDiscovered(nextReady, nextDraining);
       return;
     }
 
-    if (KubernetesEventType.ADDED.name().equals(event.getType())) {
+    if (
+      KubernetesEventType.ADDED.name().equals(event.getType()) ||
+      KubernetesEventType.MODIFIED.name().equals(event.getType())
+    ) {
       String key = sliceKey(event.getObject());
       if (key == null) {
         return;
       }
-      Set<String> notReady = notReadyEndpointNames(event.getObject());
-      sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
-      sliceDrainingEndpoints.put(key, drainingEndpointNames(event.getObject()));
-      Set<String> nextReady = aggregateReadyEndpoints();
-      Set<String> nextDraining = aggregateDrainingEndpoints();
-      if (nextReady.isEmpty() && nextDraining.isEmpty() && notReady.isEmpty()) {
-        // Avoid clearing endpoints when the add has no signal.
+      EndpointSlice previous = lastSlices.get(key);
+      if (
+        previous != null && !endpointSliceChanged(previous, event.getObject())
+      ) {
         return;
       }
-      applyDiscovered(nextReady, nextDraining);
-      return;
-    }
-
-    if (KubernetesEventType.MODIFIED.name().equals(event.getType())) {
-      String key = sliceKey(event.getObject());
-      if (key == null) {
-        return;
-      }
+      lastSlices.put(key, event.getObject());
       Set<String> notReady = notReadyEndpointNames(event.getObject());
       sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
       sliceDrainingEndpoints.put(key, drainingEndpointNames(event.getObject()));
@@ -179,6 +228,76 @@ public class KubernetesEventHandler {
       }
       applyDiscovered(nextReady, nextDraining);
     }
+  }
+
+  private boolean endpointSliceChanged(EndpointSlice a, EndpointSlice b) {
+    if (a == null || b == null) {
+      return true;
+    }
+    if (a.getPorts() == null || b.getPorts() == null) {
+      return a.getPorts() != b.getPorts();
+    }
+    if (a.getPorts().size() != b.getPorts().size()) {
+      return true;
+    }
+    for (int i = 0; i < a.getPorts().size(); i++) {
+      EndpointSlicePort ap = a.getPorts().get(i);
+      EndpointSlicePort bp = b.getPorts().get(i);
+      if (!nullSafeEquals(ap.getName(), bp.getName())) {
+        return true;
+      }
+      if (!nullSafeEquals(ap.getPort(), bp.getPort())) {
+        return true;
+      }
+      if (!nullSafeEquals(ap.getProtocol(), bp.getProtocol())) {
+        return true;
+      }
+    }
+
+    if (a.getEndpoints() == null || b.getEndpoints() == null) {
+      return a.getEndpoints() != b.getEndpoints();
+    }
+    if (a.getEndpoints().size() != b.getEndpoints().size()) {
+      return true;
+    }
+    for (int i = 0; i < a.getEndpoints().size(); i++) {
+      EndpointSliceEndpoint ea = a.getEndpoints().get(i);
+      EndpointSliceEndpoint eb = b.getEndpoints().get(i);
+      if (!nullSafeEquals(ea.getAddresses(), eb.getAddresses())) {
+        return true;
+      }
+      EndpointSliceConditions ca = ea.getConditions();
+      EndpointSliceConditions cb = eb.getConditions();
+      if (
+        !nullSafeEquals(
+          ca == null ? null : ca.getReady(),
+          cb == null ? null : cb.getReady()
+        )
+      ) {
+        return true;
+      }
+      if (
+        !nullSafeEquals(
+          ca == null ? null : ca.getServing(),
+          cb == null ? null : cb.getServing()
+        )
+      ) {
+        return true;
+      }
+      if (
+        !nullSafeEquals(
+          ca == null ? null : ca.getTerminating(),
+          cb == null ? null : cb.getTerminating()
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean nullSafeEquals(Object a, Object b) {
+    return a == null ? b == null : a.equals(b);
   }
 
   private Set<String> upsertFromEndpointSlice(EndpointSlice slice) {

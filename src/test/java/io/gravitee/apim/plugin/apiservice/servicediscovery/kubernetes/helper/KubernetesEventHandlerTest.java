@@ -123,6 +123,61 @@ class KubernetesEventHandlerTest {
   }
 
   @Test
+  void should_ignore_noop_modified_event() throws Exception {
+    RecordingEndpointManager manager = new RecordingEndpointManager();
+    KubernetesServiceDiscoveryServiceConfiguration config =
+      KubernetesServiceDiscoveryServiceConfiguration.builder()
+        .port(DEFAULT_PORT)
+        .build();
+
+    KubernetesEventHandler handler = createHandler(manager, config);
+    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice));
+
+    EndpointSlice unchanged = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    unchanged.setMetadata(slice.getMetadata());
+    handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), unchanged));
+
+    Thread.sleep(300);
+
+    assertThat(manager.updateCount).isEqualTo(1);
+    assertThat(manager.endpoints).containsKey(
+      endpointName(DEFAULT_IP, DEFAULT_PORT)
+    );
+  }
+
+  @Test
+  void should_coalesce_multiple_modified_events() throws Exception {
+    RecordingEndpointManager manager = new RecordingEndpointManager();
+    KubernetesServiceDiscoveryServiceConfiguration config =
+      KubernetesServiceDiscoveryServiceConfiguration.builder()
+        .port(DEFAULT_PORT)
+        .build();
+
+    KubernetesEventHandler handler = createHandler(manager, config);
+    EndpointSlice slice = endpointSlice(DEFAULT_IP, DEFAULT_PORT);
+    handler.handleSnapshot(List.of(slice));
+
+    EndpointSlice update1 = endpointSlice(SECOND_IP, DEFAULT_PORT);
+    update1.setMetadata(slice.getMetadata());
+    EndpointSlice update2 = endpointSlice("10.0.0.3", DEFAULT_PORT);
+    update2.setMetadata(slice.getMetadata());
+
+    handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), update1));
+    handler.handle(new Event<>(KubernetesEventType.MODIFIED.name(), update2));
+
+    Thread.sleep(500);
+
+    assertThat(manager.updateCount).isEqualTo(2);
+    assertThat(manager.endpoints).containsKey(
+      endpointName("10.0.0.3", DEFAULT_PORT)
+    );
+    assertThat(manager.endpoints).doesNotContainKey(
+      endpointName(SECOND_IP, DEFAULT_PORT)
+    );
+  }
+
+  @Test
   void should_remove_endpoints_when_becoming_not_ready() throws Exception {
     RecordingEndpointManager manager = new RecordingEndpointManager();
     KubernetesServiceDiscoveryServiceConfiguration config =
@@ -307,11 +362,13 @@ class KubernetesEventHandlerTest {
     private final Map<String, Endpoint> endpoints = new HashMap<>();
     private final Set<String> disabled = new HashSet<>();
     private final Set<String> removed = new HashSet<>();
+    private int updateCount = 0;
     private io.gravitee.common.component.Lifecycle.State state =
       io.gravitee.common.component.Lifecycle.State.STARTED;
 
     @Override
     public void addOrUpdateEndpoint(String groupName, Endpoint endpoint) {
+      updateCount++;
       endpoints.put(endpoint.getName(), endpoint);
     }
 
