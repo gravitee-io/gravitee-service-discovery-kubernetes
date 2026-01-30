@@ -118,7 +118,7 @@ public class KubernetesEventHandler {
         return;
       }
       lastSlices.put(key, slice);
-      sliceReadyEndpoints.put(key, upsertFromEndpointSlice(slice));
+      sliceReadyEndpoints.put(key, readyEndpointNames(slice));
       sliceDrainingEndpoints.put(key, drainingEndpointNames(slice));
       notReady.addAll(notReadyEndpointNames(slice));
     });
@@ -218,7 +218,7 @@ public class KubernetesEventHandler {
       }
       lastSlices.put(key, event.getObject());
       Set<String> notReady = notReadyEndpointNames(event.getObject());
-      sliceReadyEndpoints.put(key, upsertFromEndpointSlice(event.getObject()));
+      sliceReadyEndpoints.put(key, readyEndpointNames(event.getObject()));
       sliceDrainingEndpoints.put(key, drainingEndpointNames(event.getObject()));
       Set<String> nextReady = aggregateReadyEndpoints();
       Set<String> nextDraining = aggregateDrainingEndpoints();
@@ -300,13 +300,11 @@ public class KubernetesEventHandler {
     return a == null ? b == null : a.equals(b);
   }
 
-  private Set<String> upsertFromEndpointSlice(EndpointSlice slice) {
+  private Set<String> readyEndpointNames(EndpointSlice slice) {
     Set<String> names = new HashSet<>();
-    forEachEndpoint(slice, EndpointState.READY, (address, port) -> {
-      var endpoint = EndpointFactory.build(group, address, port, configuration);
-      endpointManager.addOrUpdateEndpoint(group.getName(), endpoint);
-      names.add(EndpointFactory.endpointName(address, port));
-    });
+    forEachEndpoint(slice, EndpointState.READY, (address, port) ->
+      names.add(EndpointFactory.endpointName(address, port))
+    );
     return names;
   }
 
@@ -476,7 +474,6 @@ public class KubernetesEventHandler {
       if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
         emptyHoldDisposable.dispose();
       }
-      ensureEndpointsPresent(nextReady);
       updateDiscovered(nextReady);
       return;
     }
@@ -490,7 +487,6 @@ public class KubernetesEventHandler {
         if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
           emptyHoldDisposable.dispose();
         }
-        ensureEndpointsPresent(nextDraining);
         updateDiscovered(nextDraining);
         return;
       }
@@ -508,7 +504,6 @@ public class KubernetesEventHandler {
       if (emptyHoldDisposable != null && !emptyHoldDisposable.isDisposed()) {
         emptyHoldDisposable.dispose();
       }
-      ensureEndpointsPresent(lastNonEmptyReady);
       updateDiscovered(lastNonEmptyReady);
       return;
     }
