@@ -536,6 +536,7 @@ public class KubernetesEventHandler {
     Set<String> removed = new HashSet<>(previous);
     removed.removeAll(next);
 
+    ensureEndpointsPresent(next);
     removed.forEach(endpointManager::disable);
     Completable.defer(() -> {
       removed.forEach(endpointManager::removeEndpoint);
